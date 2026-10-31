@@ -1,0 +1,25 @@
+{
+  "name": "molan-web",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "node build.mjs",
+    "test": "node test/run.mjs"
+  },
+  "dependencies": {
+    "@vscode/markdown-it-katex": "^1.1.2",
+    "esbuild": "^0.28.2",
+    "highlight.js": "^11.12.0",
+    "js-yaml": "^5.5.0",
+    "katex": "^0.19.1",
+    "markdown-it": "^15.0.3",
+    "markdown-it-anchor": "^10.0.0",
+    "markdown-it-cjk-breaks": "^2.0.1",
+    "markdown-it-cjk-friendly": "^3.0.0",
+    "markdown-it-footnote": "^4.0.0",
+    "markdown-it-front-matter": "^0.2.4",
+    "markdown-it-github-alerts": "^1.0.1",
+    "markdown-it-mark": "^4.0.0",
+    "markdown-it-task-lists": "^2.1.1"
+  }
+}

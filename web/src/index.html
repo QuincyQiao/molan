@@ -1,0 +1,19 @@
+<!doctype html>
+<html lang="zh-Hans">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self' molan:; style-src 'self' molan: 'unsafe-inline'; img-src 'self' molan: data:; font-src 'self' molan: data:; connect-src 'self' molan:; media-src 'self' molan:">
+<link rel="stylesheet" href="molan.css">
+<title>墨览</title>
+</head>
+<body>
+<button id="back" class="glass" hidden><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M10 3 5 8l5 5"/></svg><span id="back-name"></span></button>
+<button id="toc-btn" class="glass" hidden><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M2.5 4h1M6 4h7.5M2.5 8h1M6 8h7.5M2.5 12h1M6 12h7.5"/></svg></button>
+<nav id="toc" class="glass" hidden></nav>
+<div id="find" class="glass" hidden><svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="7" cy="7" r="4.5"/><path d="m10.5 10.5 3 3"/></svg><input id="find-input" type="search" spellcheck="false" autocomplete="off"><span id="find-count"></span></div>
+<main id="doc" class="doc"></main>
+<script src="molan.js"></script>
+</body>
+</html>

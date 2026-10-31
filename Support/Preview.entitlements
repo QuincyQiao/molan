@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>com.apple.security.app-sandbox</key><true/>
+	<!-- 只读整个磁盘：文档旁边的图片、反引号路径指向的文件 -->
+	<key>com.apple.security.temporary-exception.files.absolute-path.read-only</key>
+	<array><string>/</string></array>
+	<!-- WKWebView 的辅助进程在沙盒里要这一项才起得来；页面本身不联网（见 index.html 的内容安全策略） -->
+	<key>com.apple.security.network.client</key><true/>
+</dict>
+</plist>
