@@ -5,12 +5,25 @@ import { basename, fileURL } from './paths.js';
 
 const $ = (sel, root = document) => root.querySelector(sel);
 const doc = $('#doc');
+const editor = $('#editor');
+const previewPane = $('#preview-pane');
+const divider = $('#divider');
 const chrome = { back: $('#back'), backName: $('#back-name'), tocBtn: $('#toc-btn'), toc: $('#toc'), find: $('#find'), findInput: $('#find-input'), findCount: $('#find-count') };
 
 const MD_EXT = /\.(md|markdown|mdown|mkd|mdx|mdc|qmd|rmd)$/i;
 const BIG = 200_000;
 
 let current = null;          // { path, dir, home, text, ... }
+let editing = false;
+let viewMode = 'read';
+let dirty = false;
+let savedScroll = 0;
+let savedText = '';
+let previewText = null;
+let previewTimer = null;
+let composing = false;
+let saving = null;
+let renderRevision = 0;
 const history = [];          // [{ payload, scrollY }]
 let headingObserver = null;
 let tableObserver = null;
@@ -21,6 +34,12 @@ function post(msg) {
   if (h) { h.postMessage(msg); return true; }
   if (msg.type === 'open') window.open(msg.url, '_blank');
   return false;
+}
+
+function postAsync(msg) {
+  const h = window.webkit?.messageHandlers?.molan;
+  if (!h) return Promise.resolve(null);
+  try { return Promise.resolve(h.postMessage(msg)); } catch { return Promise.resolve(null); }
 }
 
 async function getJSON(url) {
@@ -39,10 +58,37 @@ function applySettings(s = {}) {
 
 // ---------- 渲染 ----------
 async function show(payload, { scrollY = 0, hash = '' } = {}) {
+  clearTimeout(previewTimer);
   current = payload;
+  editor.value = payload.text;
+  editor.readOnly = !!payload.readOnly;
+  $('#source-label').textContent = payload.readOnly ? '源码 · 只读' : '源码';
+  savedText = editor.value;
+  previewText = null;
+  dirty = false;
+  savedScroll = scrollY;
+  setMode(payload.viewMode || viewMode, { focus: false });
+  savedScroll = scrollY;
+  editor.scrollTop = previewPane.scrollTop = 0;
+  editor.setSelectionRange(0, 0);
+  updateDirty();
   document.title = payload.name || basename(payload.path || '');
   const t0 = performance.now();
-  const r = render(payload.text, { dir: payload.dir, home: payload.home });
+  renderPreview();
+  updateBack();
+  window.scrollTo(0, scrollY);
+  if (hash) scrollToHash(hash, false);
+  post({ type: 'location', path: payload.path });
+  post({ type: 'rendered', ms: Math.round(performance.now() - t0) });
+}
+
+function renderPreview() {
+  clearTimeout(previewTimer);
+  if (!current || previewText === editor.value) return;
+  const revision = ++renderRevision;
+  previewText = editor.value;
+  const scrollY = previewPane.scrollTop;
+  const r = render(previewText, { dir: current.dir, home: current.home });
   doc.classList.toggle('big', r.html.length > BIG);
   doc.innerHTML = r.html;
   if (r.hasMath) loadStyle('katex/katex.min.css');
@@ -50,14 +96,107 @@ async function show(payload, { scrollY = 0, hash = '' } = {}) {
   enhanceImages();
   watchTables();
   buildToc(r.headings);
-  updateBack();
-  window.scrollTo(0, scrollY);
-  if (hash) scrollToHash(hash, false);
-  post({ type: 'rendered', ms: Math.round(performance.now() - t0) });
+  previewPane.scrollTop = scrollY;
   // 下面这些不挡第一屏
-  if (r.hasMermaid) renderMermaid();
-  linkPaths();
+  mermaidSources = [];
+  if (r.hasMermaid) renderMermaid(revision);
+  linkPaths(revision);
 }
+
+// ---------- 编辑 ----------
+function setMode(mode, { focus = true } = {}) {
+  if (!current || !['read', 'edit', 'split'].includes(mode)) return;
+  if (viewMode === 'read') savedScroll = window.scrollY;
+  viewMode = mode;
+  editing = mode !== 'read';
+  document.body.classList.toggle('editing', editing);
+  document.body.classList.toggle('split', mode === 'split');
+  closeToc();
+  closeFind();
+  if (mode !== 'edit') renderPreview();
+  if (mode === 'read') window.scrollTo(0, savedScroll);
+  else if (focus) editor.focus({ preventScroll: true });
+  doc.querySelectorAll('.table-wrap').forEach(layoutTable);
+  post({ type: 'mode', mode, editing });
+}
+
+function updateDirty() {
+  dirty = editor.value !== savedText;
+  post({ type: 'dirty', dirty });
+}
+
+async function performSave(force = false) {
+  if (!current || editor.readOnly) return false;
+  if (!dirty) return true;
+  const text = editor.value;
+  const res = await postAsync({ type: 'save', text, force });
+  if (!res) { window.alert('保存只在墨览 App 里可用。'); return false; }
+  if (res.conflict && !force) {
+    if (window.confirm('这个文件在磁盘上已经被别的程序改过。仍然保存并覆盖吗？')) return performSave(true);
+    return false;
+  }
+  if (!res.ok) { window.alert(res.error || '保存失败。'); return false; }
+  current.text = text;
+  savedText = text;
+  updateDirty();
+  return true;
+}
+
+async function save() {
+  if (saving) return saving;
+  saving = performSave();
+  try { return await saving; } finally { saving = null; }
+}
+
+async function saveAndRead() {
+  if (await save()) setMode('read');
+}
+
+editor.addEventListener('input', () => {
+  updateDirty();
+  clearTimeout(previewTimer);
+  if (viewMode === 'split' && !composing) {
+    previewTimer = setTimeout(renderPreview, editor.value.length > BIG ? 800 : 250);
+  }
+});
+editor.addEventListener('compositionstart', () => { composing = true; clearTimeout(previewTimer); });
+editor.addEventListener('compositionend', () => {
+  composing = false;
+  editor.dispatchEvent(new Event('input'));
+});
+
+// Tab 不要跳走，缩进两个空格
+editor.addEventListener('keydown', (e) => {
+  if (editor.readOnly || e.isComposing || e.key !== 'Tab' || e.metaKey || e.ctrlKey || e.altKey) return;
+  e.preventDefault();
+  // execCommand 保留系统撤销栈，Tab 插入也可以用 ⌘Z 撤销。
+  document.execCommand('insertText', false, '  ');
+});
+
+// 双栏分隔线：拖动调整，双击恢复一半，键盘左右键也可调整。
+function resizeSource(percent) {
+  const value = Math.max(20, Math.min(80, percent));
+  document.documentElement.style.setProperty('--source-width', `${value}%`);
+  divider.setAttribute('aria-valuenow', String(Math.round(value)));
+  doc.querySelectorAll('.table-wrap').forEach(layoutTable);
+}
+divider.addEventListener('pointerdown', (e) => {
+  divider.setPointerCapture(e.pointerId);
+  document.body.classList.add('resizing');
+});
+divider.addEventListener('pointermove', (e) => {
+  if (!divider.hasPointerCapture(e.pointerId)) return;
+  resizeSource(e.clientX / document.documentElement.clientWidth * 100);
+});
+function stopResizing() { document.body.classList.remove('resizing'); }
+divider.addEventListener('pointerup', stopResizing);
+divider.addEventListener('lostpointercapture', stopResizing);
+divider.addEventListener('dblclick', () => resizeSource(50));
+divider.addEventListener('keydown', (e) => {
+  if (!['ArrowLeft', 'ArrowRight', 'Home'].includes(e.key)) return;
+  e.preventDefault();
+  resizeSource(e.key === 'Home' ? 50 : Number(divider.getAttribute('aria-valuenow')) + (e.key === 'ArrowLeft' ? -5 : 5));
+});
 
 function loadStyle(href) {
   if (document.querySelector(`link[href="${href}"]`)) return;
@@ -138,11 +277,13 @@ function layoutTable(wrap) {
   const natural = table.offsetWidth;
   table.style.width = '';
   if (natural <= wrap.clientWidth + 1) { wrap.classList.add('fits'); return; }
-  const view = document.documentElement.clientWidth;
+  const view = viewMode === 'split' ? previewPane.clientWidth : document.documentElement.clientWidth;
+  const origin = viewMode === 'split' ? previewPane.getBoundingClientRect().left : 0;
   const width = Math.min(natural, view - 48);
   wrap.classList.add('wide');
   wrap.style.width = `${width}px`;
-  wrap.style.marginLeft = `${(view - width) / 2 - wrap.getBoundingClientRect().left}px`;
+  wrap.style.marginLeft = `${origin + (view - width) / 2 - wrap.getBoundingClientRect().left}px`;
+  if (viewMode === 'split') table.style.width = 'max-content';
   if (wrap.scrollWidth > wrap.clientWidth + 1) {
     wrap.classList.add('scroll');
     updateTableEdges(wrap);
@@ -199,7 +340,7 @@ async function resolveAll(candidates) {
   return out;
 }
 
-async function linkPaths() {
+async function linkPaths(revision = renderRevision) {
   const payload = current;
   const codes = [...doc.querySelectorAll('code')].filter((c) => !c.closest('pre, a'));
   const wikis = [...doc.querySelectorAll('[data-wiki]')];
@@ -218,7 +359,7 @@ async function linkPaths() {
   }
   if (!cand.length) return;
   const found = await resolveAll(cand);
-  if (payload !== current) return;
+  if (payload !== current || revision !== renderRevision) return;
   for (const [code, p] of codeCand) {
     const hit = found.get(p);
     if (!hit) continue;
@@ -240,11 +381,13 @@ async function linkPaths() {
 }
 
 // ---------- 流程图 ----------
-async function renderMermaid() {
+let mermaidQueue = Promise.resolve();
+async function renderMermaid(revision = renderRevision) {
   const nodes = [...doc.querySelectorAll('pre.mermaid')];
   mermaidSources = nodes.map((n) => n.textContent);
   try {
     await loadScript('mermaid.min.js');
+    if (revision !== renderRevision) return;
     await drawMermaid();
   } catch (e) {
     nodes.forEach((n) => n.classList.add('failed'));
@@ -252,6 +395,11 @@ async function renderMermaid() {
 }
 
 async function drawMermaid() {
+  const revision = renderRevision;
+  const nodes = [...doc.querySelectorAll('pre.mermaid')];
+  const sources = [...mermaidSources];
+  mermaidQueue = mermaidQueue.catch(() => {}).then(async () => {
+  if (revision !== renderRevision) return;
   const dark = matchMedia('(prefers-color-scheme: dark)').matches;
   window.mermaid.initialize({
     startOnLoad: false,
@@ -259,9 +407,10 @@ async function drawMermaid() {
     theme: dark ? 'dark' : 'neutral',
     fontFamily: getComputedStyle(document.body).fontFamily,
   });
-  const nodes = [...doc.querySelectorAll('pre.mermaid')];
-  nodes.forEach((n, i) => { n.removeAttribute('data-processed'); n.textContent = mermaidSources[i]; });
+  nodes.forEach((n, i) => { n.removeAttribute('data-processed'); n.textContent = sources[i]; });
   await window.mermaid.run({ nodes, suppressErrors: true });
+  });
+  return mermaidQueue;
 }
 
 matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => {
@@ -326,6 +475,7 @@ function scrollToHash(hash, smooth = true) {
 
 async function openLocal(path, hash, isDir) {
   if (!isDir && MD_EXT.test(path)) {
+    if (!await mayLeave()) return;
     try {
       const payload = await getJSON(`/doc?path=${encodeURIComponent(path)}`);
       history.push({ payload: current, scrollY: window.scrollY });
@@ -337,9 +487,16 @@ async function openLocal(path, hash, isDir) {
   post({ type: 'reveal', path, dir: !!isDir });
 }
 
-function goBack() {
+async function mayLeave() {
+  if (!dirty) return true;
+  const res = await postAsync({ type: 'confirmNavigate' });
+  return res?.ok === true;
+}
+
+async function goBack() {
+  if (!await mayLeave()) return;
   const prev = history.pop();
-  if (prev) show(prev.payload, { scrollY: prev.scrollY });
+  if (prev) show({ ...prev.payload, viewMode }, { scrollY: prev.scrollY });
 }
 
 function updateBack() {
@@ -414,6 +571,7 @@ chrome.findInput.addEventListener('keydown', (e) => {
 
 document.addEventListener('keydown', (e) => {
   const cmd = e.metaKey || e.ctrlKey;
+  if (editing) return;
   if (cmd && e.key === 'f') { e.preventDefault(); openFind(); }
   else if (cmd && e.key === 'g') { e.preventDefault(); findNext(e.shiftKey); }
   else if (cmd && (e.key === '[' || e.key === 'ArrowLeft') && history.length) { e.preventDefault(); goBack(); }
@@ -432,6 +590,10 @@ window.molan = {
   find: openFind,
   back: goBack,
   open: (path) => openLocal(path, '', false),
+  setMode,
+  save,
+  saveAndRead,
+  editorText: () => editor.value,
 };
 
 window.molan.boot().catch((e) => {

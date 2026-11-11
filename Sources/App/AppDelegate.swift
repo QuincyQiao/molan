@@ -21,6 +21,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationShouldTerminateAfterLastWindowClosed(_ app: NSApplication) -> Bool { true }
 
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        guard let window, window.hasUnsavedChanges else { return .terminateNow }
+        window.confirmSave { ok in
+            sender.reply(toApplicationShouldTerminate: ok)
+        }
+        return .terminateLater
+    }
+
     func applicationDidBecomeActive(_ note: Notification) {
         window?.refreshStatus()
     }
@@ -42,19 +50,31 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         let file = NSMenu(title: "文件")
         file.addItem(withTitle: "打开…", action: #selector(MainWindowController.openDocument(_:)), keyEquivalent: "o")
+        file.addItem(withTitle: "保存", action: #selector(MainWindowController.saveDocument(_:)), keyEquivalent: "s")
+        file.addItem(.separator())
         file.addItem(withTitle: "在访达中显示", action: #selector(MainWindowController.revealDocument(_:)), keyEquivalent: "R").keyEquivalentModifierMask = [.command, .shift]
         file.addItem(.separator())
         file.addItem(withTitle: "关闭", action: #selector(NSWindow.performClose(_:)), keyEquivalent: "w")
         main.addItem(submenu: file, title: "文件")
 
         let edit = NSMenu(title: "编辑")
+        edit.addItem(withTitle: "撤销", action: Selector(("undo:")), keyEquivalent: "z")
+        let redo = edit.addItem(withTitle: "重做", action: Selector(("redo:")), keyEquivalent: "z")
+        redo.keyEquivalentModifierMask = [.command, .shift]
+        edit.addItem(.separator())
+        edit.addItem(withTitle: "剪切", action: #selector(NSText.cut(_:)), keyEquivalent: "x")
         edit.addItem(withTitle: "拷贝", action: #selector(NSText.copy(_:)), keyEquivalent: "c")
+        edit.addItem(withTitle: "粘贴", action: #selector(NSText.paste(_:)), keyEquivalent: "v")
         edit.addItem(withTitle: "全选", action: #selector(NSText.selectAll(_:)), keyEquivalent: "a")
         edit.addItem(.separator())
         edit.addItem(withTitle: "查找…", action: #selector(MainWindowController.findInDocument(_:)), keyEquivalent: "f")
         main.addItem(submenu: edit, title: "编辑")
 
         let view = NSMenu(title: "显示")
+        view.addItem(withTitle: "阅读", action: #selector(MainWindowController.readMode(_:)), keyEquivalent: "1")
+        view.addItem(withTitle: "源码", action: #selector(MainWindowController.sourceMode(_:)), keyEquivalent: "2")
+        view.addItem(withTitle: "双栏", action: #selector(MainWindowController.splitMode(_:)), keyEquivalent: "3")
+        view.addItem(.separator())
         view.addItem(withTitle: "返回", action: #selector(MainWindowController.goBack(_:)), keyEquivalent: "[")
         view.addItem(.separator())
         view.addItem(withTitle: "放大", action: #selector(MainWindowController.zoomIn(_:)), keyEquivalent: "+")

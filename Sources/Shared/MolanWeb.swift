@@ -17,6 +17,8 @@ enum MolanPaths {
     }()
     static let settingsFile = URL(fileURLWithPath: home)
         .appendingPathComponent("Library/Application Support/Molan/settings.json")
+    static let backups = URL(fileURLWithPath: home)
+        .appendingPathComponent("Library/Application Support/Molan/Backups")
 }
 
 struct MolanSettings: Codable, Equatable {
@@ -50,21 +52,75 @@ struct MolanSettings: Codable, Equatable {
 }
 
 enum MolanText {
-    // UTF-8 优先；老文件可能是 GB18030 或 UTF-16
-    static func decode(_ data: Data) -> String {
-        if data.starts(with: [0xEF, 0xBB, 0xBF]), let s = String(data: data.dropFirst(3), encoding: .utf8) { return s }
-        if data.starts(with: [0xFF, 0xFE]) || data.starts(with: [0xFE, 0xFF]), let s = String(data: data, encoding: .utf16) { return s }
-        if let s = String(data: data, encoding: .utf8) { return s }
+    static func decode(_ data: Data) -> String { detect(data).text }
+
+    // 读的时候把编码、BOM、换行符一起认出来，保存时原样写回
+    static func detect(_ data: Data) -> MolanDecodedText {
+        let text: String
+        let encoding: MolanTextEncoding
+        let bom: Bool
+
+        if data.starts(with: [0xEF, 0xBB, 0xBF]) {
+            text = String(data: data.dropFirst(3), encoding: .utf8) ?? String(decoding: data.dropFirst(3), as: UTF8.self)
+            encoding = .utf8; bom = true
+        } else if data.starts(with: [0xFF, 0xFE]) {
+            text = String(data: data.dropFirst(2), encoding: .utf16LittleEndian) ?? String(decoding: data, as: UTF8.self)
+            encoding = .utf16le; bom = true
+        } else if data.starts(with: [0xFE, 0xFF]) {
+            text = String(data: data.dropFirst(2), encoding: .utf16BigEndian) ?? String(decoding: data, as: UTF8.self)
+            encoding = .utf16be; bom = true
+        } else if let s = String(data: data, encoding: .utf8) {
+            text = s; encoding = .utf8; bom = false
+        } else {
+            let gb = CFStringConvertEncodingToNSStringEncoding(CFStringEncoding(CFStringEncodings.GB_18030_2000.rawValue))
+            if let s = String(data: data, encoding: String.Encoding(rawValue: gb)) {
+                text = s; encoding = .gb18030; bom = false
+            } else {
+                text = String(decoding: data, as: UTF8.self); encoding = .utf8; bom = false
+            }
+        }
+        return MolanDecodedText(text: text, encoding: encoding, bom: bom, eol: detectEOL(text))
+    }
+
+    static func encode(_ text: String, encoding: MolanTextEncoding, bom: Bool, eol: String) -> Data? {
+        let lf = text.replacingOccurrences(of: "\r\n", with: "\n").replacingOccurrences(of: "\r", with: "\n")
+        let final = eol == "\n" ? lf : lf.replacingOccurrences(of: "\n", with: eol)
         let gb = CFStringConvertEncodingToNSStringEncoding(CFStringEncoding(CFStringEncodings.GB_18030_2000.rawValue))
-        if let s = String(data: data, encoding: String.Encoding(rawValue: gb)) { return s }
-        return String(decoding: data, as: UTF8.self)
+        var body: Data?
+        switch encoding {
+        case .utf8: body = final.data(using: .utf8)
+        case .utf16le: body = final.data(using: .utf16LittleEndian)
+        case .utf16be: body = final.data(using: .utf16BigEndian)
+        case .gb18030: body = final.data(using: String.Encoding(rawValue: gb))
+        }
+        guard var out = body else { return nil }
+        if bom {
+            switch encoding {
+            case .utf8: out = Data([0xEF, 0xBB, 0xBF]) + out
+            case .utf16le: out = Data([0xFF, 0xFE]) + out
+            case .utf16be: out = Data([0xFE, 0xFF]) + out
+            case .gb18030: break
+            }
+        }
+        return out
+    }
+
+    static func detectEOL(_ text: String) -> String {
+        let crlf = text.components(separatedBy: "\r\n").count - 1
+        let withoutCRLF = text.replacingOccurrences(of: "\r\n", with: "")
+        let lf = withoutCRLF.components(separatedBy: "\n").count - 1
+        let cr = withoutCRLF.components(separatedBy: "\r").count - 1
+        if crlf > 0 && crlf >= lf && crlf >= cr { return "\r\n" }
+        if cr > lf { return "\r" }
+        return "\n"
     }
 }
 
 final class MolanSchemeHandler: NSObject, WKURLSchemeHandler {
     let resources: URL
-    var document: URL?
+    var document: MolanDocument?
     var settings = MolanSettings()
+    var viewMode = "read"
     private var stopped = Set<ObjectIdentifier>()
     private let queue = DispatchQueue(label: "molan.scheme", qos: .userInitiated)
 
@@ -77,10 +133,10 @@ final class MolanSchemeHandler: NSObject, WKURLSchemeHandler {
         let comps = URLComponents(url: url, resolvingAgainstBaseURL: false)
         let path = url.path
         let query = Dictionary((comps?.queryItems ?? []).map { ($0.name, $0.value ?? "") }, uniquingKeysWith: { a, _ in a })
-        let doc = document, settings = settings, resources = resources
+        let doc = document, settings = settings, resources = resources, viewMode = viewMode
         let id = ObjectIdentifier(task)
         queue.async { [weak self] in
-            let reply = Self.respond(path: path, query: query, document: doc, settings: settings, resources: resources)
+            let reply = Self.respond(path: path, query: query, document: doc, settings: settings, resources: resources, viewMode: viewMode)
             DispatchQueue.main.async {
                 guard let self, !self.stopped.contains(id) else { return }
                 var headers = ["Content-Type": reply.type, "Cache-Control": "no-store"]
@@ -108,18 +164,18 @@ final class MolanSchemeHandler: NSObject, WKURLSchemeHandler {
         }
     }
 
-    private static func respond(path: String, query: [String: String], document: URL?, settings: MolanSettings, resources: URL) -> Reply {
+    private static func respond(path: String, query: [String: String], document: MolanDocument?, settings: MolanSettings, resources: URL, viewMode: String) -> Reply {
         if path == "/doc" {
-            let target = query["path"].map { URL(fileURLWithPath: $0) } ?? document
-            guard let target, let data = try? Data(contentsOf: target) else { return .notFound() }
-            return .json([
-                "path": target.path,
-                "name": target.lastPathComponent,
-                "dir": target.deletingLastPathComponent().path,
-                "home": MolanPaths.home,
-                "text": MolanText.decode(data),
-                "settings": settings.jsonForPage,
-            ])
+            let target: MolanDocument?
+            if let p = query["path"] {
+                target = try? MolanDocument(url: URL(fileURLWithPath: p))
+            } else {
+                target = document
+            }
+            guard let target else { return .notFound() }
+            var payload = target.json(settings: settings)
+            payload["viewMode"] = viewMode
+            return .json(payload)
         }
         if path == "/resolve" {
             let base = query["base"] ?? "/"
@@ -200,19 +256,28 @@ final class MolanWebView: WKWebView {
 }
 
 // WKUserContentController 会强引用 handler，中间垫一层免得循环引用
-private final class WeakMessageProxy: NSObject, WKScriptMessageHandler {
-    weak var target: WKScriptMessageHandler?
-    init(_ target: WKScriptMessageHandler) { self.target = target }
-    func userContentController(_ c: WKUserContentController, didReceive message: WKScriptMessage) {
-        target?.userContentController(c, didReceive: message)
+private final class WeakMessageProxy: NSObject, WKScriptMessageHandlerWithReply {
+    weak var target: MolanWeb?
+    init(_ target: MolanWeb) { self.target = target }
+    func userContentController(_ c: WKUserContentController, didReceive message: WKScriptMessage, replyHandler: @escaping (Any?, String?) -> Void) {
+        guard let target else { replyHandler(nil, "页面已关闭"); return }
+        target.userContentController(c, didReceive: message, replyHandler: replyHandler)
     }
 }
 
-final class MolanWeb: NSObject, WKScriptMessageHandler, WKNavigationDelegate {
+final class MolanWeb: NSObject, WKScriptMessageHandlerWithReply, WKNavigationDelegate, WKUIDelegate {
     let webView: MolanWebView
     let handler: MolanSchemeHandler
     private var waiting: CheckedContinuation<Void, Never>?
+    private(set) var document: MolanDocument?
+    private(set) var isDirty = false
+    private(set) var isEditing = false
+    var preferredMode = "read" { didSet { handler.viewMode = preferredMode } }
     var onRendered: (() -> Void)?
+    var onDirtyChange: ((Bool) -> Void)?
+    var onModeChange: ((String) -> Void)?
+    var onLocationChange: ((URL) -> Void)?
+    var onConfirmNavigation: ((@escaping (Bool) -> Void) -> Void)?
 
     static var resourcesInBundle: URL {
         // 扩展里资源在自己的包里；主程序去 PlugIns 里的扩展包找，同一份
@@ -228,8 +293,9 @@ final class MolanWeb: NSObject, WKScriptMessageHandler, WKNavigationDelegate {
         config.suppressesIncrementalRendering = true
         webView = MolanWebView(frame: NSRect(x: 0, y: 0, width: 900, height: 1000), configuration: config)
         super.init()
-        config.userContentController.add(WeakMessageProxy(self), name: "molan")
+        config.userContentController.addScriptMessageHandler(WeakMessageProxy(self), contentWorld: .page, name: "molan")
         webView.navigationDelegate = self
+        webView.uiDelegate = self
         webView.setValue(false, forKey: "drawsBackground")
         webView.allowsMagnification = true
     }
@@ -244,7 +310,26 @@ final class MolanWeb: NSObject, WKScriptMessageHandler, WKNavigationDelegate {
 
     // 载入文档，等页面排完第一屏（最多等 timeout 秒）
     func show(_ file: URL, timeout: Double = 4) async {
-        handler.document = file
+        guard let doc = try? MolanDocument(url: file) else {
+            handler.document = nil
+            document = nil
+            await loadPage(timeout: timeout)
+            return
+        }
+        await show(doc, timeout: timeout)
+    }
+
+    func show(_ doc: MolanDocument, timeout: Double = 4) async {
+        handler.document = doc
+        document = doc
+        isDirty = false
+        isEditing = false
+        onDirtyChange?(false)
+        onModeChange?(preferredMode)
+        await loadPage(timeout: timeout)
+    }
+
+    private func loadPage(timeout: Double) async {
         await withCheckedContinuation { (c: CheckedContinuation<Void, Never>) in
             waiting = c
             webView.load(URLRequest(url: URL(string: "molan:///res/index.html")!))
@@ -257,8 +342,11 @@ final class MolanWeb: NSObject, WKScriptMessageHandler, WKNavigationDelegate {
         waiting = nil
     }
 
-    func userContentController(_ c: WKUserContentController, didReceive message: WKScriptMessage) {
-        guard let body = message.body as? [String: Any], let type = body["type"] as? String else { return }
+    func userContentController(_ c: WKUserContentController, didReceive message: WKScriptMessage, replyHandler: @escaping (Any?, String?) -> Void) {
+        guard let body = message.body as? [String: Any], let type = body["type"] as? String else {
+            replyHandler(nil, nil)
+            return
+        }
         switch type {
         case "rendered":
             finishWaiting()
@@ -268,17 +356,111 @@ final class MolanWeb: NSObject, WKScriptMessageHandler, WKNavigationDelegate {
                 NSWorkspace.shared.open(url)
             }
         case "reveal":
-            guard let p = body["path"] as? String else { return }
-            let url = URL(fileURLWithPath: p)
-            if body["dir"] as? Bool == true { NSWorkspace.shared.open(url) } else { NSWorkspace.shared.activateFileViewerSelecting([url]) }
+            if let p = body["path"] as? String {
+                let url = URL(fileURLWithPath: p)
+                if body["dir"] as? Bool == true { NSWorkspace.shared.open(url) } else { NSWorkspace.shared.activateFileViewerSelecting([url]) }
+            }
         case "copy":
             if let text = body["text"] as? String {
                 NSPasteboard.general.clearContents()
                 NSPasteboard.general.setString(text, forType: .string)
             }
+        case "location":
+            if let p = body["path"] as? String { onLocationChange?(URL(fileURLWithPath: p)) }
+        case "dirty":
+            let value = body["dirty"] as? Bool ?? false
+            if value != isDirty { isDirty = value; onDirtyChange?(value) }
+        case "mode":
+            let value = body["editing"] as? Bool ?? false
+            isEditing = value
+            let mode = body["mode"] as? String ?? (value ? "edit" : "read")
+            if ["read", "edit", "split"].contains(mode) { onModeChange?(mode) }
+        case "confirmNavigate":
+            if let onConfirmNavigation {
+                onConfirmNavigation { ok in replyHandler(["ok": ok], nil) }
+            } else {
+                replyHandler(["ok": !isDirty], nil)
+            }
+            return
+        case "save":
+            let text = body["text"] as? String ?? ""
+            let force = body["force"] as? Bool ?? false
+            guard let document else {
+                replyHandler(["ok": false, "error": "没有打开的文档。"], nil)
+                return
+            }
+            do {
+                try document.write(text, force: force)
+                isDirty = false
+                onDirtyChange?(false)
+                replyHandler(["ok": true], nil)
+            } catch MolanDocumentError.changedOnDisk {
+                replyHandler(["ok": false, "conflict": true], nil)
+            } catch {
+                replyHandler(["ok": false, "error": error.localizedDescription], nil)
+            }
+            return
         default:
             break
         }
+        replyHandler(nil, nil)
+    }
+
+    // 页面切到别的文档（点链接、返回）时，主程序跟着换当前文件
+    func adopt(_ doc: MolanDocument) {
+        handler.document = doc
+        document = doc
+        isDirty = false
+        onDirtyChange?(false)
+    }
+
+    func markClean() {
+        isDirty = false
+        onDirtyChange?(false)
+    }
+
+    func saveText(_ text: String, force: Bool = false) throws {
+        guard let document else { throw MolanDocumentError.noDocument }
+        try document.write(text, force: force)
+        isDirty = false
+        onDirtyChange?(false)
+    }
+
+    func editorText() async -> String? {
+        let js = "const e = document.getElementById('editor'); if (!e) throw new Error('没有编辑框'); return e.value"
+        do {
+            let value = try await webView.callAsyncJavaScript(js, arguments: [:], in: nil, contentWorld: .page)
+            return value as? String
+        } catch {
+            return nil
+        }
+    }
+
+    func evaluate(_ js: String) {
+        webView.evaluateJavaScript(js)
+    }
+
+    func saveFromPage() async -> Bool {
+        (try? await webView.callAsyncJavaScript("return await molan.save()", arguments: [:], in: nil, contentWorld: .page)) as? Bool ?? false
+    }
+
+    func webView(_ webView: WKWebView, runJavaScriptAlertPanelWithMessage message: String, initiatedByFrame frame: WKFrameInfo, completionHandler: @escaping () -> Void) {
+        let alert = NSAlert()
+        alert.messageText = message
+        alert.addButton(withTitle: "好")
+        if let window = webView.window {
+            alert.beginSheetModal(for: window) { _ in completionHandler() }
+        } else { alert.runModal(); completionHandler() }
+    }
+
+    func webView(_ webView: WKWebView, runJavaScriptConfirmPanelWithMessage message: String, initiatedByFrame frame: WKFrameInfo, completionHandler: @escaping (Bool) -> Void) {
+        let alert = NSAlert()
+        alert.messageText = message
+        alert.addButton(withTitle: "覆盖")
+        alert.addButton(withTitle: "取消")
+        if let window = webView.window {
+            alert.beginSheetModal(for: window) { completionHandler($0 == .alertFirstButtonReturn) }
+        } else { completionHandler(alert.runModal() == .alertFirstButtonReturn) }
     }
 
     // 页面只能待在 molan:///res/index.html；别的跳转一律拦下，网页链接交给浏览器
@@ -292,6 +474,10 @@ final class MolanWeb: NSObject, WKScriptMessageHandler, WKNavigationDelegate {
     }
 
     func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
+        isEditing = false
+        isDirty = false
+        onModeChange?("read")
+        onDirtyChange?(false)
         webView.reload()
     }
 }

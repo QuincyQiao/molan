@@ -119,6 +119,26 @@ enum SelfTest {
         check(MolanText.decode(gbData) == "中文标题", "GB18030 编码")
         check(MolanText.decode(Data([0xEF, 0xBB, 0xBF]) + Data("墨".utf8)) == "墨", "带 BOM 的 UTF-8")
 
+        // 编码、BOM、换行符往返
+        let samples: [(MolanTextEncoding, Bool)] = [(.utf8, false), (.utf8, true), (.utf16le, true), (.utf16be, true), (.gb18030, false)]
+        for (enc, bom) in samples {
+            guard let data = MolanText.encode("中文\n第二行", encoding: enc, bom: bom, eol: "\r\n") else {
+                check(false, "编码往返 \(enc.rawValue)")
+                continue
+            }
+            let back = MolanText.detect(data)
+            check(back.text == "中文\r\n第二行" && back.encoding == enc && back.bom == bom && back.eol == "\r\n", "编码往返 \(enc.rawValue)")
+        }
+
+        // 保存写回
+        let editURL = tmp.appendingPathComponent("edit.md")
+        try? Data("旧文\n".utf8).write(to: editURL)
+        if let doc = try? MolanDocument(url: editURL) {
+            doc.createsBackups = false
+            try? doc.write("新文\n")
+            check(MolanText.decode((try? Data(contentsOf: editURL)) ?? Data()) == "新文\n", "保存写回")
+        }
+
         let sample = resources.appendingPathComponent("sample.md")
         let web = MolanWeb(resources: resources)
         let window = offscreenWindow(for: web.webView, size: NSSize(width: 900, height: 900))
@@ -132,6 +152,50 @@ enum SelfTest {
         check(tables == 1, "表格")
         let math = try? await web.webView.evaluateJavaScript("document.querySelectorAll('#doc .katex').length") as? Int
         check((math ?? 0) > 0, "公式")
+
+        // 编辑 → 保存，走真实的消息桥和文件写入
+        if let editDoc = try? MolanDocument(url: editURL) {
+            editDoc.createsBackups = false
+            await web.show(editDoc, timeout: 15)
+            _ = try? await web.webView.evaluateJavaScript("molan.setMode('edit'); 0")
+            _ = try? await web.webView.evaluateJavaScript("const e = document.getElementById('editor'); e.value = '# 新标题\\n正文\\n'; e.dispatchEvent(new Event('input')); 0")
+            // 切换视图必须保留缓冲区和脏状态，阅读预览也必须显示未保存的内容。
+            _ = try? await web.webView.evaluateJavaScript("molan.setMode('split'); 0")
+            let splitOK = try? await web.webView.evaluateJavaScript("document.body.classList.contains('split') && document.querySelector('#doc h1').textContent === '新标题'") as? Bool
+            check(splitOK == true && web.isDirty, "双栏显示未保存内容")
+            _ = try? await web.webView.evaluateJavaScript("molan.setMode('read'); molan.setMode('edit'); 0")
+            check(await web.editorText() == "# 新标题\n正文\n" && web.isDirty, "三种视图切换不丢编辑内容")
+            // 真实 input 触发防抖渲染，不借助模式切换。
+            _ = try? await web.webView.evaluateJavaScript("molan.setMode('split'); e.value = '# 实时更新\\n正文\\n'; e.dispatchEvent(new Event('input')); 0")
+            try? await Task.sleep(nanoseconds: 500_000_000)
+            let liveTitle = try? await web.webView.evaluateJavaScript("document.querySelector('#doc h1').textContent") as? String
+            check(liveTitle == "实时更新", "双栏输入后实时预览")
+            // 中文输入法组字期间不重绘，确认候选后再更新。
+            _ = try? await web.webView.evaluateJavaScript("e.dispatchEvent(new CompositionEvent('compositionstart')); e.value = '# 中文输入\\n'; e.dispatchEvent(new Event('input')); 0")
+            try? await Task.sleep(nanoseconds: 350_000_000)
+            let composingTitle = try? await web.webView.evaluateJavaScript("document.querySelector('#doc h1').textContent") as? String
+            check(composingTitle == "实时更新", "中文组字期间不重绘")
+            _ = try? await web.webView.evaluateJavaScript("e.dispatchEvent(new CompositionEvent('compositionend')); 0")
+            try? await Task.sleep(nanoseconds: 500_000_000)
+            let composedTitle = try? await web.webView.evaluateJavaScript("document.querySelector('#doc h1').textContent") as? String
+            check(composedTitle == "中文输入", "中文确认后刷新预览")
+            _ = try? await web.webView.evaluateJavaScript("molan.setMode('read'); 0")
+            _ = try? await web.webView.callAsyncJavaScript("return await molan.save()", arguments: [:], in: nil, contentWorld: .page)
+            check((try? String(contentsOf: editURL, encoding: .utf8)) == "# 中文输入\n" && !web.isDirty, "阅读视图也能保存编辑内容")
+            _ = try? await web.webView.evaluateJavaScript("molan.setMode('edit'); e.value += '改动'; e.dispatchEvent(new Event('input')); e.value = '# 中文输入\\n'; e.dispatchEvent(new Event('input')); 0")
+            check(!web.isDirty, "内容恢复保存版本时取消脏标记")
+            web.preferredMode = "split"
+            await web.show(editDoc, timeout: 15)
+            let remembered = try? await web.webView.evaluateJavaScript("document.body.classList.contains('split')") as? Bool
+            check(remembered == true, "重新打开文档保留双栏选择")
+        }
+        // 快速查看使用独立 Web 实例，保持只读阅读视图。
+        let quickLook = MolanWeb(resources: resources)
+        let quickWindow = offscreenWindow(for: quickLook.webView, size: NSSize(width: 900, height: 900))
+        await quickLook.show(sample, timeout: 15)
+        let quickReading = try? await quickLook.webView.evaluateJavaScript("!document.body.classList.contains('editing')") as? Bool
+        check(quickReading == true, "快速查看仍使用阅读视图")
+        quickWindow.orderOut(nil)
         window.orderOut(nil)
 
         if failures.isEmpty {
@@ -170,6 +234,9 @@ enum Snapshot {
         let t0 = Date()
         await web.show(input, timeout: 20)
         let ms = Int(Date().timeIntervalSince(t0) * 1000)
+        if let mode = argValue("--mode"), ["read", "edit", "split"].contains(mode) {
+            _ = try? await web.webView.evaluateJavaScript("molan.setMode('\(mode)'); 0")
+        }
         if scroll > 0 { _ = try? await web.webView.evaluateJavaScript("window.scrollTo(0, \(scroll)); 0") }
         try? await Task.sleep(nanoseconds: UInt64((Double(argValue("--wait") ?? "") ?? 0.7) * 1_000_000_000))
         if let js = argValue("--eval") {

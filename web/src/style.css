@@ -506,3 +506,75 @@ button.glass svg, #find svg { width: 16px; height: 16px; fill: none; stroke: cur
   .doc { max-width: none; padding: 0; }
   th { position: static; }
 }
+
+
+/* ---------- 源码与预览 ---------- */
+#source-pane, #divider, .pane-label { display: none; }
+#editor {
+  box-sizing: border-box;
+  display: block;
+  width: 100%;
+  flex: 1;
+  min-height: 0;
+  margin: 0;
+  padding: 24px 32px 64px;
+  border: 0;
+  outline: 0;
+  resize: none;
+  background: transparent;
+  color: var(--text);
+  caret-color: var(--accent);
+  font-family: ui-monospace, "SF Mono", SFMono-Regular, Menlo, "PingFang SC", monospace;
+  font-size: calc(var(--font-size) * 0.95);
+  line-height: 1.8;
+  tab-size: 4;
+  white-space: pre-wrap;
+  overflow-wrap: break-word;
+  overflow-y: auto;
+}
+
+body.editing { overflow: hidden; }
+body.editing #workspace { height: 100vh; }
+body.editing #source-pane { display: flex; flex-direction: column; min-height: 0; height: 100%; }
+body.editing .pane-label {
+  display: flex;
+  align-items: center;
+  flex: 0 0 36px;
+  padding: 0 28px;
+  border-bottom: 1px solid var(--line);
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: 0.04em;
+  color: var(--text-3);
+  user-select: none;
+}
+body.editing:not(.split) #source-pane { max-width: var(--measure); margin: 0 auto; }
+body.editing:not(.split) #preview-pane { display: none; }
+body.editing #back,
+body.editing #toc-btn,
+body.editing #toc,
+body.editing #find { display: none !important; }
+
+body.split #workspace {
+  display: grid;
+  grid-template-columns: minmax(0, var(--source-width, 50%)) 7px minmax(0, 1fr);
+}
+body.split #preview-pane { display: flex; flex-direction: column; min-width: 0; overflow-y: auto; overflow-x: hidden; }
+body.split #preview-pane > .pane-label { position: sticky; top: 0; z-index: 5; background: var(--bg); }
+body.split #doc { width: 100%; padding: 24px 28px 64px; }
+body.split #editor { padding: 24px 28px 64px; }
+body.split #divider {
+  display: block;
+  cursor: col-resize;
+  touch-action: none;
+  background: linear-gradient(to right, transparent 3px, var(--line) 3px, var(--line) 4px, transparent 4px);
+}
+body.split #divider:hover, body.split #divider:focus-visible, body.resizing #divider { background: var(--accent-soft); outline: 0; }
+body.resizing { cursor: col-resize; user-select: none; }
+body.split .front-matter { grid-template-columns: minmax(0, max-content) minmax(0, 1fr); }
+body.split .front-matter dd { overflow-wrap: anywhere; }
+
+@media (max-width: 640px) {
+  #editor, body.split #editor, body.split #doc { padding: 20px 18px 48px; }
+  body.editing .pane-label { padding: 0 18px; }
+}

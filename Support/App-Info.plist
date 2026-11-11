@@ -8,8 +8,8 @@
 	<key>CFBundleExecutable</key><string>Molan</string>
 	<key>CFBundleIconFile</key><string>Molan</string>
 	<key>CFBundlePackageType</key><string>APPL</string>
-	<key>CFBundleShortVersionString</key><string>1.0</string>
-	<key>CFBundleVersion</key><string>1</string>
+	<key>CFBundleShortVersionString</key><string>1.1</string>
+	<key>CFBundleVersion</key><string>2</string>
 	<key>CFBundleDevelopmentRegion</key><string>zh_CN</string>
 	<key>LSApplicationCategoryType</key><string>public.app-category.productivity</string>
 	<key>LSMinimumSystemVersion</key><string>14.0</string>
@@ -19,7 +19,7 @@
 	<array>
 		<dict>
 			<key>CFBundleTypeName</key><string>Markdown</string>
-			<key>CFBundleTypeRole</key><string>Viewer</string>
+			<key>CFBundleTypeRole</key><string>Editor</string>
 			<key>LSHandlerRank</key><string>Alternate</string>
 			<key>LSItemContentTypes</key>
 			<array>

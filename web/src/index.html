@@ -13,7 +13,17 @@
 <button id="toc-btn" class="glass" hidden><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M2.5 4h1M6 4h7.5M2.5 8h1M6 8h7.5M2.5 12h1M6 12h7.5"/></svg></button>
 <nav id="toc" class="glass" hidden></nav>
 <div id="find" class="glass" hidden><svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="7" cy="7" r="4.5"/><path d="m10.5 10.5 3 3"/></svg><input id="find-input" type="search" spellcheck="false" autocomplete="off"><span id="find-count"></span></div>
-<main id="doc" class="doc"></main>
+<div id="workspace">
+  <section id="source-pane" aria-label="Markdown 源码">
+    <div class="pane-label" id="source-label">源码</div>
+    <textarea id="editor" spellcheck="false" autocapitalize="off" autocomplete="off" aria-label="Markdown 源码"></textarea>
+  </section>
+  <div id="divider" role="separator" tabindex="0" aria-label="调整源码和预览宽度" aria-orientation="vertical" aria-valuemin="20" aria-valuemax="80" aria-valuenow="50"></div>
+  <section id="preview-pane" aria-label="Markdown 预览">
+    <div class="pane-label">预览</div>
+    <main id="doc" class="doc"></main>
+  </section>
+</div>
 <script src="molan.js"></script>
 </body>
 </html>

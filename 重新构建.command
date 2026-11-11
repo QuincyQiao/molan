@@ -3,6 +3,7 @@
 # 只想打包不安装：MOLAN_STAGE_ONLY=1 ./重新构建.command（产物在 .build/墨览.app）
 # 在桌面放一个替身：MOLAN_DESKTOP_ALIAS=1；装完不自动打开：MOLAN_NO_OPEN=1
 set -euo pipefail
+unset HTTPS_PROXY HTTP_PROXY https_proxy http_proxy ALL_PROXY all_proxy
 project_dir="${0:A:h}"
 build_dir="$project_dir/.build"
 web_dir="$project_dir/web"
@@ -51,7 +52,7 @@ done
 /usr/bin/codesign --force --sign - --timestamp=none --requirements '=designated => identifier "local.molan"' "$staged_app"
 /usr/bin/codesign --verify --strict --deep "$staged_app"
 
-if [[ -n "${MOLAN_STAGE_ONLY:-}" ]]; then
+if [[ -n "${MOLAN_STAGE_ONLY:-}${SOFTWARE_SYNC_STAGE_ONLY:-}" ]]; then
     print -r -- "已打包：$staged_app"
     exit 0
 fi
